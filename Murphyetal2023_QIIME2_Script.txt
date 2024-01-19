@@ -1,0 +1,183 @@
+#!/bin/bash
+     
+#Activate qiime2
+
+source activate qiime2-2020.2
+	 
+#Navigate into the location where the sequence files are located
+
+cd Desktop
+	 
+#https://docs.qiime2.org/2018.6/tutorials/overview/#taxonomy-classification-and-taxonomic-analyses
+#https://sites.google.com/site/knightslabwiki/qiime-workflow
+#visualization at https://view.qiime2.org/
+
+#I have p#casava-18-paired-end-demultiplexed sequences and need to list the file as: #SampleData[PairedEndSequencesWithQuality]. R1 is forward and R2 is reverse.
+#To see other types of 'type' files for QIIME tools import, see https://github.com/qiime2/q2cli/issues/124		
+		
+#create qiime aritfact
+# https://docs.qiime2.org/2019.7/tutorials/importing/ USE THIS- you have a Casava file
+
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path casava-18-paired-end-demultiplexed \
+  --input-format CasavaOneEightSingleLanePerSampleDirFmt \
+  --output-path demux-paired-end.qza
+	
+#use this to peek at the data
+
+qiime tools peek demux-paired-end.qza
+
+#denoises sequences, dereplicates them, and filters chimeras
+#https://docs.qiime2.org/2018.6/plugins/available/dada2/denoise-pyro/
+
+qiime dada2 denoise-paired \
+	--i-demultiplexed-seqs demux-paired-end.qza \
+	--p-trim-left-f 20 \
+	--p-trim-left-r 20 \
+	--p-trunc-len-f 230 \
+	--p-trunc-len-r 230 \
+	--p-trunc-q 15 \
+	--p-chimera-method consensus \
+	--o-representative-sequences rep-seqs-denoise.qza \
+	--o-table rep_seq_feature_table.qza \
+	--o-denoising-stats denoising-stats.gza \
+	--verbose
+	
+#summary stats of denoise and quality filtering
+
+qiime feature-table summarize \
+	--i-table rep_seq_feature_table.qza \
+	--o-visualization rep_seq_feature_table-view.qzv \
+	--m-sample-metadata-file /Users/kaitlynmurphy/Desktop/Egg_Metadata.txt
+
+#Feature table!	
+
+qiime feature-table tabulate-seqs \
+	--i-data rep-seqs-denoise.qza \
+	--o-visualization rep-seqs-view.qzv
+
+#Filter features from feature table
+#features must be a minimum sum of 20 across all samples and must be present in at least 2 samples
+#https://docs.qiime2.org/2019.7/tutorials/filtering/
+	
+qiime feature-table filter-features \
+	--i-table rep_seq_feature_table.qza \
+	--p-min-frequency 20 \
+	--p-min-samples 2 \
+	--o-filtered-table rep_seq_feature_table2.qza
+	
+#Now filter sequences to match table 
+#https://docs.qiime2.org/2018.8/plugins/available/feature-table/filter-seqs/
+
+qiime feature-table filter-seqs \
+	--i-data rep-seqs-denoise.qza \
+	--i-table rep_seq_feature_table2.qza \
+	--o-filtered-data rep-seqs-filtered.qza \
+	
+#summary stats of filtering
+
+qiime feature-table summarize \
+	--i-table rep_seq_feature_table2.qza \
+	--o-visualization rep_seq_feature_table_filter-view.qzv \
+	--m-sample-metadata-file /Users/kaitlynmurphy/Desktop/Egg_Metadata.txt
+
+#rarefaction curve
+
+qiime diversity alpha-rarefaction \
+	--i-table rep_seq_feature_table2.qza \
+	--p-max-depth 14246 \
+	--m-metadata-file Egg_Metadata.txt \
+	--o-visualization alpha-rarefaction.qzv
+
+#Taxonomy Classification and taxonomic analyses
+#https://www.arb-silva.de/fileadmin/silva_databases/qiime/Silva_132_release.zip
+#https://docs.qiime2.org/2018.6/tutorials/feature-classifier/
+#https://forum.qiime2.org/t/silva-132-classifiers/3698
+#https://www.dropbox.com/s/5tv5uk95pk3ukwf/7_level_taxonomy.qza?dl=0
+
+#consensus must match 100% where majority is 90% to the cluster; 7 levels refers to taxonomic levels
+
+qiime feature-classifier extract-reads \
+	--i-sequences 99_otus.qza \
+	--p-f-primer GTGCCAGCMGCCGCGGTAA \
+	--p-r-primer GGACTACHVGGGTWTCTAAT \
+	--o-reads gg-ref-seqs.qza
+	
+#training sklearn
+
+qiime feature-classifier fit-classifier-naive-bayes \
+	--i-reference-reads gg-ref-seqs.qza \
+	--i-reference-taxonomy 99_otu_taxonomy.qza \
+	--o-classifier gg-99-classifier.qza
+  
+qiime feature-classifier classify-sklearn \
+	--i-classifier gg-99-classifier.qza \
+	--i-reads rep-seqs-filtered.qza \
+	--o-classification classified_taxonomy_table.qza
+	
+qiime metadata tabulate \
+	--m-input-file classified_taxonomy_table.qza \
+	--o-visualization classified_taxonomy.qzv
+
+qiime taxa barplot \
+	--i-table rep_seq_feature_table2.qza \
+	--i-taxonomy classified_taxonomy_table.qza \
+	--m-metadata-file Egg_Metadata.txt \
+	--o-visualization taxa-barplots.qzv
+
+qiime feature-table heatmap --i-table rep_seq_feature_table2.qza --m-metadata-file Egg_Metadata.txt --o-visualization heatmap.qzv --m-metadata-column subject	  
+	
+#qiime taxa collapse 
+
+qiime taxa collapse --i-table rep_seq_feature_table2.qza --i-taxonomy classified_taxonomy_table.qza --p-level 7 --o-collapsed-table rep_seq_feature_table3_collapsed.qza
+	
+#export data
+
+qiime tools export --input-path rep_seq_feature_table3_collapsed.qza --output-path exported
+qiime tools export --input-path classified_taxonomy_table.qza --output-path exported
+	
+biom add-metadata -i feature-table.biom -o Egg_table_w_taxonomy.biom --observation-metadata-fp Egg_Metadata.txt --sc-separated taxonomy
+
+biom convert -i Egg_table_w_taxonomy.biom -o Egg_w_taxonomy.tsv --to-tsv
+	
+#Filter/separate two treatment groups based on body site in order to determine differential abundance
+
+qiime feature-table filter-samples --i-table rep_seq_feature_table3_collapsed.qza --m-metadata-file Egg_metadata.txt --p-where "subject='S'" --o-filtered-table Egg-Swab-abundance-table.qza
+	
+qiime feature-table filter-samples --i-table rep_seq_feature_table3_collapsed.qza --m-metadata-file Egg_Metadata.txt --p-where "subject='N'" --o-filtered-table Egg-Sonication-abundance-table.qza
+
+qiime diversity alpha --i-table Egg-Sonication-abundance-table.qza --p-metric shannon --o-alpha-diversity Sonic_observed_otus.qzv
+
+qiime diversity alpha --i-table Egg-Swab-abundance-table.qza --p-metric observed_otus --o-alpha-diversity observed_otus.qzv
+
+qiime diversity alpha-rarefaction --i-table Egg-Sonication-abundance-table.qza --p-max-depth 14246 --m-metadata-file Egg_Metadata.txt --o-visualization rarefaction_21383.qzv
+
+qiime composition add-pseudocount --i-table Egg-Sonication-abundance-table.qza --o-composition-table comp-Sonic-table.qza
+  
+qiime composition add-pseudocount --i-table Egg-Swab-abundance-table.qza --o-composition-table comp-Swab-table.qza
+
+#Creating a phylogenetic tree
+#https://github.com/shenjean/Qiime2-workflow/wiki/Step-6:-Generate-a-tree-for-phylogenetic-diversity-analyses
+
+qiime phylogeny align-to-tree-mafft-fasttree --i-sequences rep-seqs-filtered.qza --o-alignment aligned.qza --o-masked-alignment masked.qza --o-tree unrooted-tree.qza --o-rooted-tree rooted-tree.qza
+
+#If you want to export the tree in Newick or Nexus format
+qiime tools export \
+  --input-path rooted-tree.tree.qza \
+  --output-path exported-tree
+
+#Faith's phylogenetic diversity
+#https://forum.qiime2.org/t/alpha-and-beta-diversity-explanations-and-commands/2282
+
+qiime diversity alpha-phylogenetic \
+  --i-table rep_seq_feature_table2.qza \
+  --i-phylogeny rooted-tree.qza \
+  --p-metric faith_pd \
+  --o-alpha-diversity faith_pd_vector.qza
+
+#Exports file in tsv format
+qiime tools export \
+  --input-path faith_pd_vector.qza \
+  --output-path faiths
+    	
